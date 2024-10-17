@@ -4,13 +4,27 @@ import axios from "axios";
 
 // API 서버 주소
 const API_SERVER = 'http://192.168.0.208:10124';
+
 // 세션 키
 const SessionKey = 'smartchat-session';
+
 // 초기 컨텍스트 생성
 export const AuthContext = createContext();
 
 // 인증 제공자 컴포넌트
 export const AuthProvider = ({ children }) => {
+    
+    // 토큰이 게스트 토큰인지 확인
+    const isGuestToken = (tokens) => {
+        // 토큰의 payload를 확인하여 게스트 토큰인지 판단
+        try{
+            const decoded = jwtDecode(tokens.access_token);
+            return decoded.role === 'guest';
+        }catch(error){
+            console.log('토큰 디코딩 오류', error);
+            return true;
+        }
+    }
 
     // 세션상태관리
     // useState를 사용하여 세션을 초기화하고 관리
@@ -19,10 +33,55 @@ export const AuthProvider = ({ children }) => {
         return storedTokens ? JSON.parse(storedTokens) : null;
     });
 
-    // jwt 디코딩, 
+    // jwt 디코딩, 사용자 정보 상태관리 
     const [user, setUser] = useState(() => {
-        return authTokens ? jwtDecode(authTokens.access_token) : null;
+        if(authTokens) {
+            if(isGuestToken(authTokens)) {
+                return { role: 'guest'};
+            }else {
+               return jwtDecode(authTokens.access_token);
+            }
+        }
+        return null;
     });
+
+    // 게스트 상태 관리
+    const [isGuest, setIsGuest] = useState(() => {
+        return authTokens ? isGuestToken(authTokens) : true;
+    });
+
+    // 게스트 토큰 발급
+    useEffect(() => {
+        if(!authTokens){
+            const guestToken = async () => {
+                try{
+                    const response = await axios.get(`${API_SERVER}/api/v1/guest`,{
+                        headers:{
+                            'Accept' : 'application/json'
+                        }
+                    });
+                    const data = response.data;
+                    setAuthTokens(data);
+                    localStorage.setItem(SessionKey, JSON.stringify(data));
+                    console.log('게스트 데이터', response.data);
+                    setIsGuest(true);
+                    setUser({role: 'guest'});
+                }catch(error){
+                    console.log("게스트 토큰 발급 실패", error);
+                }
+            };
+            guestToken();
+        }else{
+            // 기존 토큰이 게스트 토큰인지 확인
+            if (isGuestToken(authTokens)) {
+                setIsGuest(true);
+                setUser({role: 'guest'});
+            } else {
+                setIsGuest(false);
+                setUser(jwtDecode(authTokens.access_token));
+            }
+        }
+    }, [authTokens]);
 
     // 로그인 함수 access 토큰
     const login = async (username, password) => {
@@ -34,12 +93,13 @@ export const AuthProvider = ({ children }) => {
                 headers: { 
                     'Accept' : 'application/json',
                     'Content-Type' : 'application/x-www-form-urlencoded'
-                 }
+                    }
             });
-            //console.log("로그인 시 통신 데이터", response.data);
+            
             const data = response.data;
             setAuthTokens(data);
             setUser(jwtDecode(data.access_token));
+            setIsGuest(false);
             localStorage.setItem(SessionKey, JSON.stringify(data));
             
             console.log("로그인 성공");
@@ -48,6 +108,7 @@ export const AuthProvider = ({ children }) => {
             throw error;
         }
     }
+
     // 리프레시 토큰
     const refreshToken = useCallback(async () => {
         try{
@@ -62,6 +123,7 @@ export const AuthProvider = ({ children }) => {
             const data = response.data;
             setAuthTokens(data);
             setUser(jwtDecode(data.access_token));
+            setIsGuest(false);
             localStorage.setItem(SessionKey, JSON.stringify(data));
         }catch(error){
             console.log('리프레시 토큰 실패', error);
@@ -72,8 +134,29 @@ export const AuthProvider = ({ children }) => {
     // 로그아웃 함수
     const logout = () => {
         setAuthTokens(null);
-        setUser(null);
+        setUser({role: 'guest'});
+        setIsGuest(true);
         localStorage.removeItem(SessionKey);
+
+        // 로그아웃 후 다시 게스트 토큰 발급 로직 필요
+        const guestToken = async () => {
+            try{
+                const response = await axios.get(`${API_SERVER}/api/v1/guest`,{
+                    headers:{
+                        'Accept' : 'application/json'
+                    }
+                });
+                const data = response.data;
+                setAuthTokens(data);
+                localStorage.setItem(SessionKey, JSON.stringify(data));
+                console.log('게스트 데이터', response.data);
+                setIsGuest(true);
+                setUser({role: 'guest'});
+            }catch(error){
+                console.log("게스트 토큰 발급 실패", error);
+            }
+        };
+        guestToken();
     }
 
     // 토큰 만료 여부 확인, 디코딩
@@ -89,7 +172,7 @@ export const AuthProvider = ({ children }) => {
     useEffect(() => {
         const requsetInterceptor = axios.interceptors.request.use(
             async(config) => {
-                if(authTokens) {
+                if(authTokens && !isGuest) {
                     if(isToKenExpired(authTokens.access_token)){
                         await refreshToken();
                     }
@@ -104,19 +187,19 @@ export const AuthProvider = ({ children }) => {
 
         return () => {
             axios.interceptors.request.eject(requsetInterceptor);
-            axios.interceptors.response.eject(requsetInterceptor);
+            //axios.interceptors.response.eject(requsetInterceptor);
         }
-    }, [authTokens, refreshToken]); //의존성 배열
+    }, [authTokens, refreshToken, isGuest]); //의존성 배열
 
     // 초기 세션 로드 useEffect로 세션를 관리
     useEffect(() => {
-        if(authTokens) {
+        if(authTokens && !isGuest) {
             setUser(jwtDecode(authTokens.access_token));
         }
-    }, [authTokens]);
+    }, [authTokens, isGuest]);
 
     return(
-        <AuthContext.Provider value={{ user, authTokens, login, logout }}>
+        <AuthContext.Provider value={{ user, authTokens, isGuest, login, logout }}>
             {children}
         </AuthContext.Provider>
     );
